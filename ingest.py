@@ -6,6 +6,7 @@ Document Loaders are a crucial component in the LLM workflow for RAG systems.
 """
 
 from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 import os
 
 # What is a Document Loader in the LLM workflow?
@@ -23,6 +24,31 @@ import os
 # Without document loaders, we'd have to manually parse different file formats, which would be
 # time-consuming and error-prone. LangChain's loaders handle the complexity of different file
 # formats (PDF, Word, HTML, etc.) and provide a unified interface for document processing.
+
+# Why do we need to split text into chunks?
+# ==========================================
+# Splitting text into smaller chunks is essential for RAG systems for several critical reasons:
+#
+# 1. **Token Limits**: LLMs have maximum context window sizes (e.g., 4K, 8K, 32K tokens).
+#    A full PDF can easily exceed these limits, causing errors or truncation.
+#
+# 2. **Precision in Retrieval**: When searching for relevant information, smaller chunks allow
+#    the system to retrieve the most specific and relevant sections rather than entire documents.
+#    This improves answer quality by focusing on exactly what's needed.
+#
+# 3. **Embedding Quality**: Embeddings (vector representations) work better with semantically
+#    coherent chunks. Smaller, focused chunks create more meaningful embeddings that capture
+#    specific concepts or topics.
+#
+# 4. **Efficiency**: Processing smaller chunks is faster and more cost-effective, especially
+#    when generating embeddings or performing similarity searches.
+#
+# 5. **Context Relevance**: When a user asks a question, the system retrieves only the most
+#    relevant chunks. This means the LLM receives focused context, leading to more accurate
+#    and relevant answers without being overwhelmed by irrelevant information.
+#
+# Without chunking, you'd either hit token limits, get less precise retrieval, or waste
+# computational resources processing irrelevant parts of documents.
 
 def load_pdf_from_data_folder(pdf_filename):
     """
@@ -54,9 +80,38 @@ def load_pdf_from_data_folder(pdf_filename):
     return documents
 
 
+def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
+    """
+    Split documents into smaller chunks using RecursiveCharacterTextSplitter.
+    
+    Args:
+        documents (list): List of Document objects to split
+        chunk_size (int): Maximum size of each chunk in characters (default: 1000)
+        chunk_overlap (int): Number of characters to overlap between chunks (default: 100)
+        
+    Returns:
+        list: List of Document chunks
+    """
+    # Create a RecursiveCharacterTextSplitter instance
+    # This splitter tries to split on paragraph boundaries first, then sentences,
+    # then words, and finally characters if needed. This helps preserve semantic
+    # meaning better than simple character-based splitting.
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,      # Maximum characters per chunk
+        chunk_overlap=chunk_overlap, # Overlap between chunks to preserve context
+        length_function=len,         # Function to measure chunk length
+        separators=["\n\n", "\n", " ", ""]  # Splitting hierarchy: paragraphs → sentences → words → chars
+    )
+    
+    # Split the documents into chunks
+    # This combines all pages into one text, then intelligently splits it
+    chunks = text_splitter.split_documents(documents)
+    
+    return chunks
+
+
 if __name__ == "__main__":
     # Example: Load a PDF from the data folder
-    # Replace 'your_syllabus.pdf' with the actual name of your PDF file
     pdf_filename = "ECE230L_Syllabus_F2025.pdf"
     
     try:
@@ -74,6 +129,30 @@ if __name__ == "__main__":
             print(f"\nFirst page preview:")
             print(f"Page content length: {len(documents[0].page_content)} characters")
             print(f"Metadata: {documents[0].metadata}")
+        
+        # Split the documents into chunks
+        # This is a critical step for RAG systems - see comments above for why
+        print(f"\nSplitting documents into chunks...")
+        chunks = split_documents_into_chunks(
+            documents,
+            chunk_size=1000,    # Maximum 1000 characters per chunk
+            chunk_overlap=100   # 100 characters overlap between chunks
+        )
+        
+        # Print the number of chunks created
+        print(f"Total number of chunks created: {len(chunks)}")
+        
+        # Optional: Print information about the chunks
+        if chunks:
+            print(f"\nChunk size statistics:")
+            chunk_sizes = [len(chunk.page_content) for chunk in chunks]
+            print(f"  Average chunk size: {sum(chunk_sizes) / len(chunk_sizes):.0f} characters")
+            print(f"  Smallest chunk: {min(chunk_sizes)} characters")
+            print(f"  Largest chunk: {max(chunk_sizes)} characters")
+            print(f"\nFirst chunk preview:")
+            print(f"  Content length: {len(chunks[0].page_content)} characters")
+            print(f"  Content preview: {chunks[0].page_content[:200]}...")
+            print(f"  Metadata: {chunks[0].metadata}")
             
     except FileNotFoundError as e:
         print(f"Error: {e}")
