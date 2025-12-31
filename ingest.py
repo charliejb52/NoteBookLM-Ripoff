@@ -7,6 +7,8 @@ Document Loaders are a crucial component in the LLM workflow for RAG systems.
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
 import os
 
 # What is a Document Loader in the LLM workflow?
@@ -49,6 +51,62 @@ import os
 #
 # Without chunking, you'd either hit token limits, get less precise retrieval, or waste
 # computational resources processing irrelevant parts of documents.
+
+# What is an Embedding?
+# =====================
+# An embedding is a numerical representation of text that captures its semantic meaning.
+# Think of it as converting words and sentences into a dense vector (array of numbers)
+# in a high-dimensional space (typically 384, 768, or 1536 dimensions).
+#
+# Key properties of embeddings:
+# 1. **Semantic Similarity**: Similar meanings result in similar vectors. For example,
+#    "dog" and "puppy" will have embeddings that are close together in vector space.
+# 2. **Mathematical Operations**: You can measure similarity between texts using
+#    mathematical operations like cosine similarity or Euclidean distance.
+# 3. **Fixed Size**: Regardless of text length, embeddings are always the same size,
+#    making them easy to store and compare.
+# 4. **Context-Aware**: Modern embedding models (like nomic-embed-text) understand
+#    context, so "bank" (financial) and "bank" (river) get different embeddings.
+#
+# In RAG systems, embeddings allow us to:
+# - Convert text chunks into searchable vectors
+# - Find semantically similar content (not just keyword matches)
+# - Retrieve relevant information based on meaning, not just exact text matches
+
+# Why use a Vector Database instead of a regular SQL database?
+# ============================================================
+# Vector databases (like Chroma) are specialized for storing and searching embeddings,
+# while SQL databases are designed for structured relational data. Here's why we need them:
+#
+# 1. **Similarity Search**: Vector databases excel at finding similar vectors using
+#    algorithms like cosine similarity, Euclidean distance, or approximate nearest
+#    neighbor (ANN) search. SQL databases would require complex, slow queries to
+#    compare high-dimensional vectors.
+#
+# 2. **Performance**: Vector databases use optimized indexing structures (like HNSW,
+#    IVF, or LSH) that can search millions of vectors in milliseconds. SQL databases
+#    would need to compute distances for every row, which is extremely slow.
+#
+# 3. **Scalability**: Vector databases are designed to handle billions of high-dimensional
+#    vectors efficiently. SQL databases struggle with this scale for similarity operations.
+#
+# 4. **Semantic Search**: Unlike SQL's exact match or LIKE queries, vector databases
+#    enable semantic search - finding content based on meaning, not just keywords.
+#    For example, searching for "automobile" will also find documents about "cars".
+#
+# 5. **Specialized Operations**: Vector databases support operations like:
+#    - Approximate nearest neighbor (ANN) search
+#    - Multi-vector queries (searching with multiple query vectors)
+#    - Hybrid search (combining vector similarity with metadata filters)
+#
+# In our RAG system:
+#   Text Chunks → Embeddings → Vector Database → Similarity Search → Relevant Chunks → LLM
+#
+# When a user asks a question, we:
+# 1. Convert the question into an embedding
+# 2. Search the vector database for similar chunk embeddings
+# 3. Retrieve the most relevant chunks
+# 4. Pass those chunks as context to the LLM for answering
 
 def load_pdf_from_data_folder(pdf_filename):
     """
@@ -110,6 +168,45 @@ def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
     return chunks
 
 
+def create_vector_store(chunks, persist_directory="chroma_db", embedding_model="nomic-embed-text"):
+    """
+    Create embeddings for text chunks and store them in a Chroma vector database.
+    
+    Args:
+        chunks (list): List of Document chunks to embed and store
+        persist_directory (str): Directory path where the vector database will be stored
+        embedding_model (str): Name of the Ollama embedding model to use
+        
+    Returns:
+        Chroma: Vector store instance containing the embedded chunks
+    """
+    # Initialize the embedding model
+    # OllamaEmbeddings uses a local Ollama instance to generate embeddings
+    # The model "nomic-embed-text" is a high-quality, open-source embedding model
+    # that creates 768-dimensional vectors capturing semantic meaning
+    print(f"\nInitializing embedding model: {embedding_model}...")
+    embeddings = OllamaEmbeddings(model=embedding_model)
+    
+    # Create the vector store using Chroma
+    # Chroma is an open-source, lightweight vector database that:
+    # - Stores embeddings locally in the specified directory
+    # - Provides fast similarity search capabilities
+    # - Persists data to disk so it can be reused later
+    print(f"Creating vector store in directory: {persist_directory}...")
+    vector_store = Chroma.from_documents(
+        documents=chunks,           # The text chunks to embed and store
+        embedding=embeddings,       # The embedding model to use
+        persist_directory=persist_directory  # Where to save the database
+    )
+    
+    # Persist the vector store to disk
+    # This ensures the embeddings are saved and can be loaded later without
+    # needing to re-embed all the documents
+    vector_store.persist()
+    
+    return vector_store
+
+
 if __name__ == "__main__":
     # Example: Load a PDF from the data folder
     pdf_filename = "ECE230L_Syllabus_F2025.pdf"
@@ -153,6 +250,30 @@ if __name__ == "__main__":
             print(f"  Content length: {len(chunks[0].page_content)} characters")
             print(f"  Content preview: {chunks[0].page_content[:200]}...")
             print(f"  Metadata: {chunks[0].metadata}")
+        
+        # Create embeddings and store in vector database
+        # This converts each chunk into a numerical vector and stores it for fast similarity search
+        print(f"\nCreating embeddings and storing in vector database...")
+        vector_store = create_vector_store(
+            chunks,
+            persist_directory="chroma_db",
+            embedding_model="nomic-embed-text"
+        )
+        
+        # Verify the vector store was created successfully
+        print(f"✓ Vector store created successfully!")
+        print(f"  Database location: chroma_db/")
+        print(f"  Total documents stored: {len(chunks)}")
+        
+        # Optional: Test the vector store with a sample query
+        print(f"\nTesting vector store with a sample query...")
+        test_query = "What is this course about?"
+        results = vector_store.similarity_search(test_query, k=2)
+        print(f"  Query: '{test_query}'")
+        print(f"  Retrieved {len(results)} most relevant chunks:")
+        for i, result in enumerate(results, 1):
+            print(f"    {i}. Chunk (length: {len(result.page_content)} chars)")
+            print(f"       Preview: {result.page_content[:150]}...")
             
     except FileNotFoundError as e:
         print(f"Error: {e}")
