@@ -1,13 +1,17 @@
 """
 Chat Script for Local RAG System
 
-This script demonstrates how to retrieve relevant information from the vector database
-using similarity search. It connects to the existing Chroma database and retrieves
-the most relevant chunks for a given query.
+This script completes the RAG (Retrieval-Augmented Generation) loop by:
+1. Loading the vector database
+2. Retrieving relevant chunks for user queries
+3. Using an LLM to generate answers based on the retrieved context
 """
 
 from langchain_community.vectorstores import Chroma
-from langchain_ollama import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings, ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 import os
 
 
@@ -46,24 +50,50 @@ def load_vector_store(persist_directory="chroma_db", embedding_model="nomic-embe
     return vector_store
 
 
-def retrieve_relevant_chunks(vector_store, query, k=3):
+def create_rag_chain(vector_store, llm_model="llama3"):
     """
-    Retrieve the most relevant chunks for a given query using similarity search.
+    Create a RAG (Retrieval-Augmented Generation) chain that combines:
+    - The vector store retriever
+    - A prompt template
+    - The LLM
     
     Args:
         vector_store (Chroma): The vector store instance
-        query (str): The user's question or query
-        k (int): Number of top results to retrieve (default: 3)
+        llm_model (str): Name of the Ollama LLM model to use
         
     Returns:
-        list: List of Document objects containing the most relevant chunks
+        Chain: A RAG chain that can answer questions using retrieved context
     """
-    # Use similarity_search to find the most relevant chunks
-    # This converts the query into an embedding and finds the chunks with
-    # the most similar embeddings using cosine similarity
-    results = vector_store.similarity_search(query, k=k)
+    # Create a retriever from the vector store
+    # The retriever will fetch the most relevant chunks for any query
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
     
-    return results
+    # Initialize the LLM
+    # ChatOllama uses a local Ollama instance to run the LLM
+    print(f"Initializing LLM model: {llm_model}...")
+    llm = ChatOllama(model=llm_model, temperature=0)
+    
+    # Create the prompt template
+    # This tells the LLM to only use the provided context and admit when it doesn't know
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a helpful assistant that answers questions based only on the provided context.
+        
+Use only the information from the context to answer the question. 
+If the context doesn't contain enough information to answer the question, say "I don't know" or "The provided context doesn't contain information about that."
+
+Do not make up information or use knowledge outside of the provided context."""),
+        ("human", "Context:\n{context}\n\nQuestion: {input}")
+    ])
+    
+    # Create the document chain that processes the retrieved documents
+    # This chain formats the retrieved chunks and passes them to the LLM
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    
+    # Create the retrieval chain that combines retrieval + document processing
+    # This is the complete RAG pipeline: query → retrieve → format → LLM → answer
+    rag_chain = create_retrieval_chain(retriever, document_chain)
+    
+    return rag_chain
 
 
 if __name__ == "__main__":
@@ -76,41 +106,58 @@ if __name__ == "__main__":
             persist_directory="chroma_db",
             embedding_model="nomic-embed-text"
         )
-        
-        # Get the number of documents in the database
-        # Note: We can't easily get the count from Chroma, but we know it exists
         print("✓ Vector store loaded successfully!")
         print()
         
-        # Test query
-        query = "What are the course prerequisites?"
-        
+        # Create the RAG chain
         print("=" * 60)
-        print("Testing Retrieval Mechanism")
+        print("Initializing RAG Chain")
         print("=" * 60)
-        print(f"Query: '{query}'")
-        print(f"Retrieving top 3 most relevant chunks...")
+        rag_chain = create_rag_chain(vector_store, llm_model="llama3")
+        print("✓ RAG chain ready!")
         print()
         
-        # Retrieve the most relevant chunks
-        relevant_chunks = retrieve_relevant_chunks(vector_store, query, k=3)
-        
-        # Display the results
-        print(f"Found {len(relevant_chunks)} relevant chunks:")
+        # Interactive chat loop
+        print("=" * 60)
+        print("RAG Chat System")
+        print("=" * 60)
+        print("Ask questions about the course syllabus.")
+        print("Type 'quit', 'exit', or 'q' to end the conversation.")
         print()
         
-        for i, chunk in enumerate(relevant_chunks, 1):
-            print("-" * 60)
-            print(f"Chunk {i}:")
-            print(f"  Length: {len(chunk.page_content)} characters")
-            print(f"  Metadata: {chunk.metadata}")
-            print(f"  Content:")
-            print(f"  {chunk.page_content}")
-            print()
-        
-        print("=" * 60)
-        print("✓ Retrieval mechanism is working correctly!")
-        print("=" * 60)
+        while True:
+            # Get user input
+            user_query = input("You: ").strip()
+            
+            # Check for exit commands
+            if user_query.lower() in ['quit', 'exit', 'q']:
+                print("\nGoodbye!")
+                break
+            
+            # Skip empty queries
+            if not user_query:
+                continue
+            
+            try:
+                # Invoke the RAG chain
+                # This will:
+                # 1. Convert the query to an embedding
+                # 2. Retrieve the most relevant chunks from the vector store
+                # 3. Format the chunks with the prompt
+                # 4. Send to the LLM for answer generation
+                print("\nThinking...")
+                response = rag_chain.invoke({"input": user_query})
+                
+                # Display the answer
+                print(f"\nAssistant: {response['answer']}")
+                print()
+                
+            except KeyboardInterrupt:
+                print("\n\nInterrupted by user. Goodbye!")
+                break
+            except Exception as e:
+                print(f"\nError processing query: {e}")
+                print("Please try again or type 'quit' to exit.\n")
         
     except FileNotFoundError as e:
         print(f"Error: {e}")
