@@ -1,11 +1,13 @@
 """
 Document Ingestion Script for Local RAG System
 
-This script demonstrates how to load PDF documents using LangChain's PyPDFLoader.
-Document Loaders are a crucial component in the LLM workflow for RAG systems.
+This script demonstrates how to load PDF documents using LangChain's DoclingLoader.
+DoclingLoader (by IBM) excels at handling complex PDF structures, especially tables,
+by converting them to Markdown format. This makes table data much more accessible
+to LLMs and preserves the structural relationships between rows and columns.
 """
 
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_docling import DoclingLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -108,15 +110,59 @@ import os
 # 3. Retrieve the most relevant chunks
 # 4. Pass those chunks as context to the LLM for answering
 
+# How does Markdown formatting help LLMs understand table structure?
+# ===================================================================
+# Markdown tables provide explicit structural information that helps LLMs
+# understand the relationships between data points:
+#
+# 1. **Explicit Column Headers**: Markdown tables clearly separate headers
+#    from data rows using a separator line (|-----|-----|). This tells the
+#    LLM which values belong to which columns.
+#
+#    Example:
+#    | Exam | Date | Weight |
+#    |------|------|--------|
+#    | Midterm | Oct 15 | 30% |
+#
+#    The LLM can clearly see "Oct 15" is the Date for the Midterm exam.
+#
+# 2. **Row Delimiters**: The pipe character (|) acts as a visual delimiter
+#    that separates columns. When the LLM processes "| Exam | Date |", it
+#    understands these are distinct columns, not just words next to each other.
+#
+# 3. **Alignment Information**: Markdown tables preserve the logical structure
+#    - each row represents one record
+#    - each column represents one attribute
+#    - cells in the same column share the same semantic meaning
+#
+# 4. **Context Preservation**: When a table is converted to Markdown, the
+#    relationships are preserved in a linear text format that LLMs can process
+#    naturally. The LLM can "read" the table row by row and understand that
+#    values in the same row are related.
+#
+# 5. **Query Understanding**: When you ask "What is the date of the final exam?",
+#    the LLM can:
+#    - Identify "final exam" in the Exam column
+#    - Look across the same row to find the Date column value
+#    - Understand that these values are connected because they're in the same row
+#
+# Without Markdown formatting, tables often become unstructured text like:
+#   "Exam Date Weight Midterm Oct 15 30% Final Dec 10 40%"
+#   This makes it nearly impossible for the LLM to know which date belongs to which exam.
+#
+# With Markdown, the structure is explicit and the LLM can reason about the relationships.
+
 def load_pdf_from_data_folder(pdf_filename):
     """
-    Load a PDF file from the data folder and return the loaded documents.
+    Load a PDF file from the data folder using DoclingLoader.
+    DoclingLoader excels at extracting structured content, especially tables,
+    and converts them to Markdown format for better LLM comprehension.
     
     Args:
         pdf_filename (str): Name of the PDF file in the data folder
         
     Returns:
-        list: List of Document objects containing the PDF content
+        list: List of Document objects containing the PDF content with tables as Markdown
     """
     # Construct the full path to the PDF file in the data folder
     data_folder = os.path.join(os.path.dirname(__file__), "data")
@@ -126,13 +172,18 @@ def load_pdf_from_data_folder(pdf_filename):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
-    # Create a PyPDFLoader instance
-    # PyPDFLoader uses the PyPDF library under the hood to extract text from PDF files
-    loader = PyPDFLoader(pdf_path)
+    # Create a DoclingLoader instance
+    # DoclingLoader (by IBM) is specifically designed to handle complex PDF structures:
+    # - Preserves table structure by converting to Markdown
+    # - Maintains document hierarchy and formatting
+    # - Better handles multi-column layouts
+    # - Extracts metadata more accurately
+    print(f"Loading PDF with DoclingLoader (tables will be converted to Markdown)...")
+    loader = DoclingLoader(pdf_path)
     
     # Load the document
-    # This reads the PDF and converts each page into a Document object
-    # Each Document contains the page content and metadata (page number, source file, etc.)
+    # This reads the PDF and converts tables to Markdown format
+    # Each Document contains the page content (with Markdown tables) and metadata
     documents = loader.load()
     
     return documents
@@ -152,13 +203,14 @@ def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
     """
     # Create a RecursiveCharacterTextSplitter instance
     # This splitter tries to split on paragraph boundaries first, then sentences,
-    # then words, and finally characters if needed. This helps preserve semantic
-    # meaning better than simple character-based splitting.
+    # then table boundaries (|), then words, and finally characters if needed.
+    # Including "|" in separators helps preserve Markdown table structure by
+    # avoiding splits in the middle of tables when possible.
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,      # Maximum characters per chunk
         chunk_overlap=chunk_overlap, # Overlap between chunks to preserve context
         length_function=len,         # Function to measure chunk length
-        separators=["\n\n", "\n", " ", ""]  # Splitting hierarchy: paragraphs → sentences → words → chars
+        separators=["\n\n", "\n", "|", " ", ""]  # Splitting hierarchy: paragraphs → lines → table boundaries → words → chars
     )
     
     # Split the documents into chunks
@@ -250,6 +302,30 @@ if __name__ == "__main__":
             print(f"  Content length: {len(chunks[0].page_content)} characters")
             print(f"  Content preview: {chunks[0].page_content[:200]}...")
             print(f"  Metadata: {chunks[0].metadata}")
+        
+        # Find and display a chunk containing a table (Markdown format)
+        print(f"\nSearching for chunks containing Markdown tables...")
+        table_chunks = []
+        for i, chunk in enumerate(chunks):
+            # Look for Markdown table indicators: pipe characters and table separators
+            if "|" in chunk.page_content and "---" in chunk.page_content:
+                table_chunks.append((i, chunk))
+        
+        if table_chunks:
+            print(f"Found {len(table_chunks)} chunk(s) containing tables!")
+            # Display the first table chunk found
+            chunk_idx, table_chunk = table_chunks[0]
+            print(f"\n{'=' * 60}")
+            print(f"Example: Chunk {chunk_idx} containing a Markdown table")
+            print(f"{'=' * 60}")
+            print(f"Chunk length: {len(table_chunk.page_content)} characters")
+            print(f"Metadata: {table_chunk.metadata}")
+            print(f"\nFull content (showing Markdown table structure):")
+            print("-" * 60)
+            print(table_chunk.page_content)
+            print("-" * 60)
+        else:
+            print("No chunks with Markdown tables found in this document.")
         
         # Create embeddings and store in vector database
         # This converts each chunk into a numerical vector and stores it for fast similarity search
