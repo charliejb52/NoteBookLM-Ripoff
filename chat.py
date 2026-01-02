@@ -66,7 +66,7 @@ def create_rag_chain(vector_store, llm_model="llama3"):
     """
     # Create a retriever from the vector store
     # The retriever will fetch the most relevant chunks for any query
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    retriever = vector_store.as_retriever(search_kwargs={"k": 10})
     
     # Initialize the LLM
     # ChatOllama uses a local Ollama instance to run the LLM
@@ -79,7 +79,7 @@ def create_rag_chain(vector_store, llm_model="llama3"):
         ("system", """You are a helpful assistant that answers questions based only on the provided context.
         
 Use only the information from the context to answer the question. 
-If the context doesn't contain enough information to answer the question, say "I don't know" or "The provided context doesn't contain information about that."
+If the context doesn't contain enough information to answer the question, say "I don't know" or "The provided context doesn't contain information about that." But make sure to check the entire document for information that may be relevant to the question.
 
 Do not make up information or use knowledge outside of the provided context."""),
         ("human", "Context:\n{context}\n\nQuestion: {input}")

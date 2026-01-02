@@ -1,13 +1,11 @@
 """
 Document Ingestion Script for Local RAG System
 
-This script demonstrates how to load PDF documents using LangChain's DoclingLoader.
-DoclingLoader (by IBM) excels at handling complex PDF structures, especially tables,
-by converting them to Markdown format. This makes table data much more accessible
-to LLMs and preserves the structural relationships between rows and columns.
+This script demonstrates how to load PDF documents using LangChain's PyPDFLoader.
+Document Loaders are a crucial component in the LLM workflow for RAG systems.
 """
 
-from langchain_docling import DoclingLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -155,15 +153,13 @@ import os
 
 def load_pdf_from_data_folder(pdf_filename):
     """
-    Load a PDF file from the data folder using DoclingLoader.
-    DoclingLoader excels at extracting structured content, especially tables,
-    and converts them to Markdown format for better LLM comprehension.
+    Load a PDF file from the data folder and return the loaded documents.
     
     Args:
         pdf_filename (str): Name of the PDF file in the data folder
         
     Returns:
-        list: List of Document objects containing the PDF content with tables as Markdown
+        list: List of Document objects containing the PDF content
     """
     # Construct the full path to the PDF file in the data folder
     data_folder = os.path.join(os.path.dirname(__file__), "data")
@@ -173,34 +169,14 @@ def load_pdf_from_data_folder(pdf_filename):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
-    # Create a DoclingLoader instance
-    # DoclingLoader (by IBM) is specifically designed to handle complex PDF structures:
-    # - Preserves table structure by converting to Markdown
-    # - Maintains document hierarchy and formatting
-    # - Better handles multi-column layouts
-    # - Extracts metadata more accurately
-    print(f"Loading PDF with DoclingLoader (tables will be converted to Markdown)...")
-    # DoclingLoader automatically converts tables to Markdown format
-    # The output_format parameter can be set, but 'markdown' is the default for tables
-    loader = DoclingLoader(
-        pdf_path,
-        # output_format="markdown"  # Markdown is default, but we can be explicit
-    )
+    # Create a PyPDFLoader instance
+    # PyPDFLoader uses the PyPDF library under the hood to extract text from PDF files
+    loader = PyPDFLoader(pdf_path)
     
     # Load the document
-    # This reads the PDF and converts tables to Markdown format
-    # Each Document contains the page content (with Markdown tables) and metadata
+    # This reads the PDF and converts each page into a Document object
+    # Each Document contains the page content and metadata (page number, source file, etc.)
     documents = loader.load()
-    
-    # Debug: Print a sample of the raw content to verify table extraction
-    if documents:
-        print(f"\nDebug: Checking first document for table content...")
-        first_content = documents[0].page_content
-        # Look for table-like patterns
-        if any(keyword in first_content.lower() for keyword in ['exam', 'homework', 'quiz', 'due', 'date']):
-            print(f"  Found table-related keywords in first document")
-        if "|" in first_content:
-            print(f"  ✓ Found pipe characters (Markdown table indicator)")
     
     return documents
 
@@ -219,14 +195,13 @@ def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
     """
     # Create a RecursiveCharacterTextSplitter instance
     # This splitter tries to split on paragraph boundaries first, then sentences,
-    # then table boundaries (|), then words, and finally characters if needed.
-    # Including "|" in separators helps preserve Markdown table structure by
-    # avoiding splits in the middle of tables when possible.
+    # then words, and finally characters if needed. This helps preserve semantic
+    # meaning better than simple character-based splitting.
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,      # Maximum characters per chunk
         chunk_overlap=chunk_overlap, # Overlap between chunks to preserve context
         length_function=len,         # Function to measure chunk length
-        separators=["\n\n", "\n", "|", " ", ""]  # Splitting hierarchy: paragraphs → lines → table boundaries → words → chars
+        separators=["\n\n", "\n", " ", ""]  # Splitting hierarchy: paragraphs → sentences → words → chars
     )
     
     # Split the documents into chunks
@@ -234,8 +209,8 @@ def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
     chunks = text_splitter.split_documents(documents)
     
     # Filter complex metadata that Chroma can't handle
-    # DoclingLoader adds complex nested metadata (like dl_meta) that needs to be simplified
-    # We keep only simple metadata fields (source, page numbers, etc.)
+    # This ensures only simple metadata fields (source, page numbers, etc.) are stored
+    # Complex nested metadata structures would cause errors in Chroma
     filtered_chunks = filter_complex_metadata(chunks)
     
     return filtered_chunks
@@ -298,34 +273,15 @@ if __name__ == "__main__":
         if documents:
             print(f"\nFirst page preview:")
             print(f"Page content length: {len(documents[0].page_content)} characters")
-            print(f"Metadata keys: {list(documents[0].metadata.keys())}")
-            
-            # Check if tables are present in the raw document
-            first_doc_content = documents[0].page_content
-            if "|" in first_doc_content:
-                print(f"\n✓ Found pipe characters in first document (potential tables)")
-                # Show a sample of content with pipes
-                lines_with_pipes = [line for line in first_doc_content.split("\n") if "|" in line]
-                if lines_with_pipes:
-                    print(f"  Found {len(lines_with_pipes)} lines with pipe characters")
-                    print(f"  Sample (first 5 lines with pipes):")
-                    for line in lines_with_pipes[:5]:
-                        print(f"    {line[:120]}")
-            
-            # Check all documents for table content
-            total_lines_with_pipes = 0
-            for doc in documents:
-                total_lines_with_pipes += len([line for line in doc.page_content.split("\n") if "|" in line])
-            if total_lines_with_pipes > 0:
-                print(f"\n✓ Total lines with pipe characters across all documents: {total_lines_with_pipes}")
+            print(f"Metadata: {documents[0].metadata}")
         
         # Split the documents into chunks
         # This is a critical step for RAG systems - see comments above for why
         print(f"\nSplitting documents into chunks...")
         chunks = split_documents_into_chunks(
             documents,
-            chunk_size=1500,    # Increased to 1500 to better preserve table structure
-            chunk_overlap=200   # Increased overlap to 200 for better context preservation
+            chunk_size=1000,    # Maximum 1000 characters per chunk
+            chunk_overlap=100   # 100 characters overlap between chunks
         )
         
         # Print the number of chunks created
@@ -343,52 +299,35 @@ if __name__ == "__main__":
             print(f"  Content preview: {chunks[0].page_content[:200]}...")
             print(f"  Metadata: {chunks[0].metadata}")
         
-        # Find and display chunks containing tables (Markdown format)
-        print(f"\nSearching for chunks containing Markdown tables...")
+        # Optional: Find and display chunks that might contain table-like content
+        # Note: PyPDFLoader extracts text but may not preserve table structure perfectly
+        print(f"\nSearching for chunks that might contain table-like content...")
         table_chunks = []
         for i, chunk in enumerate(chunks):
+            # Look for potential table indicators (though PyPDFLoader may not preserve structure)
             content = chunk.page_content
-            # Look for Markdown table indicators:
-            # - Pipe characters (|) indicate columns
-            # - Dashes (---) indicate table separator row
-            # - Multiple pipes in a line suggest a table row
-            has_pipes = "|" in content
-            has_separator = "---" in content or "--" in content
-            # Also check for multiple pipes in same line (table structure)
-            lines_with_pipes = [line for line in content.split("\n") if "|" in line]
-            has_table_structure = len(lines_with_pipes) >= 2  # At least header + 1 row
-            
-            if has_pipes and (has_separator or has_table_structure):
+            # Check for patterns that might indicate tabular data
+            lines = content.split("\n")
+            # Look for lines with multiple spaces or tabs (common in table extraction)
+            has_table_like_structure = any(len(line.split()) > 3 and "  " in line for line in lines[:10])
+            if has_table_like_structure and len(content) > 100:
                 table_chunks.append((i, chunk))
         
         if table_chunks:
-            print(f"Found {len(table_chunks)} chunk(s) containing tables!")
-            # Display the first few table chunks found
-            for idx, (chunk_idx, table_chunk) in enumerate(table_chunks[:3], 1):
-                print(f"\n{'=' * 60}")
-                print(f"Example {idx}: Chunk {chunk_idx} containing a Markdown table")
-                print(f"{'=' * 60}")
-                print(f"Chunk length: {len(table_chunk.page_content)} characters")
-                print(f"Metadata: {table_chunk.metadata}")
-                print(f"\nFull content (showing Markdown table structure):")
-                print("-" * 60)
-                print(table_chunk.page_content)
-                print("-" * 60)
+            print(f"Found {len(table_chunks)} chunk(s) with potential table-like content:")
+            # Display the first chunk found
+            chunk_idx, table_chunk = table_chunks[0]
+            print(f"\n{'=' * 60}")
+            print(f"Example: Chunk {chunk_idx}")
+            print(f"{'=' * 60}")
+            print(f"Chunk length: {len(table_chunk.page_content)} characters")
+            print(f"Metadata: {table_chunk.metadata}")
+            print(f"\nContent preview:")
+            print("-" * 60)
+            print(table_chunk.page_content[:500])
+            print("-" * 60)
         else:
-            print("No chunks with Markdown tables found in this document.")
-            print("\nDebugging: Checking document content for table-like structures...")
-            # Check if tables might be in the raw documents before chunking
-            for i, doc in enumerate(documents[:3]):  # Check first 3 documents
-                if "|" in doc.page_content:
-                    print(f"\nDocument {i} contains pipe characters (potential table):")
-                    # Find lines with pipes
-                    lines_with_pipes = [line for line in doc.page_content.split("\n") if "|" in line]
-                    if lines_with_pipes:
-                        print(f"  Found {len(lines_with_pipes)} lines with pipes")
-                        print(f"  Sample lines:")
-                        for line in lines_with_pipes[:5]:
-                            print(f"    {line[:100]}...")
-                    break
+            print("No chunks with obvious table-like structure found.")
         
         # Create embeddings and store in vector database
         # This converts each chunk into a numerical vector and stores it for fast similarity search
@@ -404,30 +343,6 @@ if __name__ == "__main__":
         print(f"  Database location: chroma_db/")
         print(f"  Total documents stored: {len(chunks)}")
         
-        # Debug: Search for specific table-related content in chunks
-        print(f"\nDebug: Searching chunks for table-related content...")
-        search_terms = ["final exam", "homework", "due", "exam", "quiz", "date"]
-        found_chunks = []
-        for term in search_terms:
-            for i, chunk in enumerate(chunks):
-                if term.lower() in chunk.page_content.lower():
-                    if i not in [fc[0] for fc in found_chunks]:
-                        found_chunks.append((i, term, chunk))
-                        break
-        
-        if found_chunks:
-            print(f"  Found {len(found_chunks)} chunks containing table-related terms:")
-            for chunk_idx, term, chunk in found_chunks[:3]:  # Show first 3
-                print(f"\n  Chunk {chunk_idx} (contains '{term}'):")
-                print(f"    Length: {len(chunk.page_content)} chars")
-                # Show context around the term
-                content_lower = chunk.page_content.lower()
-                term_pos = content_lower.find(term.lower())
-                if term_pos >= 0:
-                    start = max(0, term_pos - 50)
-                    end = min(len(chunk.page_content), term_pos + len(term) + 100)
-                    print(f"    Context: ...{chunk.page_content[start:end]}...")
-        
         # Optional: Test the vector store with a sample query
         print(f"\nTesting vector store with a sample query...")
         test_query = "What is this course about?"
@@ -437,17 +352,6 @@ if __name__ == "__main__":
         for i, result in enumerate(results, 1):
             print(f"    {i}. Chunk (length: {len(result.page_content)} chars)")
             print(f"       Preview: {result.page_content[:150]}...")
-        
-        # Test with a table-specific query
-        print(f"\nTesting vector store with table-specific query...")
-        table_query = "When is the final exam date?"
-        table_results = vector_store.similarity_search(table_query, k=3)
-        print(f"  Query: '{table_query}'")
-        print(f"  Retrieved {len(table_results)} most relevant chunks:")
-        for i, result in enumerate(table_results, 1):
-            print(f"    {i}. Chunk (length: {len(result.page_content)} chars)")
-            print(f"       Content: {result.page_content[:300]}...")
-            print()
             
     except FileNotFoundError as e:
         print(f"Error: {e}")
