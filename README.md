@@ -8,7 +8,7 @@ The ingest.py file handles the proper loading of pdf files as document objects o
 
 It is important that we have a standardized document object for once we get to the embedding/training the llm steps of the project so we need a flexible ingestion pipeline that can handle all different formats of documents. I was advised to use PyPDFLoader to easily achieve this.
 
-Early on I ran into some challenges ingesting my course syllabus because it was very table heavy, and as I soon came to understand tables are kind of the final boss of ingestion. Rather than adressing this now I have chosen to instead ingest my course textbook instead because which is rich with hundreds of pages of plain text and will therefore be an easier starting point.
+Early on I ran into some challenges ingesting my course syllabus because it was very table heavy, and as I soon came to understand tables are kind of the final boss of ingestion. Rather than adressing this now I have chosen to ingest my course textbook instead because it is rich with hundreds of pages of plain text and will therefore be an easier starting point.
 
 2. Document Chunking:
 
