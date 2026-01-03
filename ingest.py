@@ -257,7 +257,7 @@ def create_vector_store(chunks, persist_directory="chroma_db", embedding_model="
 
 if __name__ == "__main__":
     # Example: Load a PDF from the data folder
-    pdf_filename = "ECE230L_Syllabus_F2025.pdf"
+    pdf_filename = "Neamen.pdf"
     
     try:
         # Load the PDF documents
