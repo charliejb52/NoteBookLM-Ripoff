@@ -8,25 +8,7 @@ The ingest.py file handles the proper loading of pdf files as document objects o
 
 It is important that we have a standardized document object for once we get to the embedding/training the llm steps of the project so we need a flexible ingestion pipeline that can handle all different formats of documents. I was advised to use PyPDFLoader to easily achieve this.
 
-running into a slight problem: ingestor as it is cannot deal with tables...
-
-I tried using the UnstructuredPDFLoader insteda but am still having the same issue...
-
-Ok I realized that Unstructured may have worked but needed certain "system dependencies"??? So going with another approach: Using IBM's docling model that converts tables into markdowns which are able to be understood by the text splitter as natural text much easier.
-
-Still having some trouble with this method because the docling model gives too much metadata than is necessary for the chromaDB, we will need to filter most of it out.
-
-Even after these changes llama3 is still having trouble finding things in the table, could only do it with this very specific prompt:
-
-    You: at the very end of the document there is a table that specifies dates of things, does it say in there?
-
-    Thinking...
-
-    Assistant: Yes, according to the context, there is a table that specifies dates for certain events. The table mentions "Su, 12/14" which appears to be a date for reading or homework.
-
-maybe the table still isn't parsing as a markdown? or maybe llama3 isn't able to understand the format of the markdown? remains to be seen...
-
-Conclusion: for now, I am gonna take out the docling model so because it is messing things up. If at some point I want to make the ingestion compatible with tables will have to find something.
+Early on I ran into some challenges ingesting my course syllabus because it was very table heavy, and as I soon came to understand tables are kind of the final boss of ingestion. Rather than adressing this now I have chosen to instead ingest my course textbook instead because which is rich with hundreds of pages of plain text and will therefore be an easier starting point.
 
 2. Document Chunking:
 
@@ -60,4 +42,12 @@ Three possible ways:
 - Euclidian distance(L2 norm): find the straight line distance between the two vectors, this is not as good for NLP because two vectors could have very similar direction(semantic meaning) but be very far apart if they have different magnitudes. This is better for image/sensor stuff where intensity matters too
 - Dot product: kind of a combination of the two, takes angle between and magnitude into account. Works well for reccomendation systems. Think about someone looking for a movie that has a high intensity preference for action, a movie that is purely action will yield a high dot product.
 
-The current iteration uses vector_store.as_retriever() which uses cosine similarity ()
+The current iteration uses vector_store.as_retriever() which uses cosine similarity.
+
+I am running into a problem with the retrieval: the chunk detailing the final percentages corresponding to certain letter grades is consistantly not found by the retriever when I ask it about the "grading scale" which is the exact title of the section.
+
+I know that the chunk containing the whole section exists because of the debug_chunks file so it must be something else...
+
+I think it is the fact that basically 95% of the section is all numbers and letter grades, which although are extremely relevant to the "grading scale", do not have any true semantic meaning. Thats why the section doesn't appear as very similar to the prompt even though it is actually the most relevant of any of the chunks.
+
+To deal with this I think I will try to implement some sort of hybrid vector search/keyowrd search method that is able to combat this issue. Not sure how that will go quite yet.
