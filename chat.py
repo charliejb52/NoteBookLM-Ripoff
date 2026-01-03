@@ -15,6 +15,12 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 import os
 
 
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+
+
+
 def load_vector_store(persist_directory="chroma_db", embedding_model="nomic-embed-text"):
     """
     Load an existing Chroma vector store from disk.
@@ -64,9 +70,26 @@ def create_rag_chain(vector_store, llm_model="llama3"):
     Returns:
         Chain: A RAG chain that can answer questions using retrieved context
     """
-    # Create a retriever from the vector store
-    # The retriever will fetch the most relevant chunks for any query
-    retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+    # Create a base retriever from the vector store
+    # The retriever will fetch the 20 most relevant chunks for any query based on cosine similarity
+    # this can be done very quickly and efficiently but it is not very good at finding the most relevant chunks
+    base_retriever = vector_store.as_retriever(search_kwargs={"k": 20})
+
+
+
+    # Create a reranker model to improve the relevance of the chunks
+    # This model is trained to rank chunks based on their relevance to a given query
+    # it is a cross-encoder model that uses the BAAI/bge-reranker-base model
+    # it is a very good model at finding the most relevant chunks
+    model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+
+    # We configure it to return only the 3 best documents
+    compressor = CrossEncoderReranker(model=model, top_n=3)
+
+    retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=base_retriever
+    )
     
     # Initialize the LLM
     # ChatOllama uses a local Ollama instance to run the LLM
