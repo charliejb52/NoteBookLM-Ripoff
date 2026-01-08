@@ -1,52 +1,95 @@
 """
 Document Ingestion Script for Local RAG System
 
-This script demonstrates how to load PDF documents using LangChain's PyPDFLoader.
-Document Loaders are a crucial component in the LLM workflow for RAG systems.
+This script loads Apple 8-K filings (current reports) and ingests them into ChromaDB
+for use in the RAG pipeline. 8-K filings contain recent, event-driven information
+such as quarterly earnings announcements and press releases.
 """
 
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import BSHTMLLoader, TextLoader, UnstructuredHTMLLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores.utils import filter_complex_metadata
+from download_apple_8k import find_latest_filing_files
+from pathlib import Path
 import os
 
 
 # In the RAG pipeline:
 #   Raw Files → Document Loader → Text Splitter → Embeddings → Vector Store → Retrieval → LLM
 
-def load_pdf_from_data_folder(pdf_filename):
+def load_filing_file(file_path):
     """
-    Load a PDF file from the data folder and return the loaded documents.
+    Load an HTML or text filing file using the appropriate LangChain document loader.
     
     Args:
-        pdf_filename (str): Name of the PDF file in the data folder
+        file_path (str): Path to the HTML or text filing file
         
     Returns:
-        list: List of Document objects containing the PDF content
+        list: List of Document objects containing the file content
     """
-    # Construct the full path to the PDF file in the data folder
-    data_folder = os.path.join(os.path.dirname(__file__), "data")
-    pdf_path = os.path.join(data_folder, pdf_filename)
+    file_ext = Path(file_path).suffix.lower()
     
-    # Check if the file exists
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+    if file_ext in ['.htm', '.html']:
+        # Use BSHTMLLoader for HTML files (uses BeautifulSoup)
+        # Alternative: UnstructuredHTMLLoader for more complex HTML parsing
+        try:
+            loader = BSHTMLLoader(file_path)
+        except Exception as e:
+            print(f"BSHTMLLoader failed for {file_path}, trying UnstructuredHTMLLoader: {e}")
+            loader = UnstructuredHTMLLoader(file_path)
+    elif file_ext == '.txt':
+        loader = TextLoader(file_path, encoding='utf-8')
+    else:
+        raise ValueError(f"Unsupported file type: {file_ext}")
     
-    # Create a PyPDFLoader instance
-    # PyPDFLoader uses the PyPDF library under the hood to extract text from PDF files
-    loader = PyPDFLoader(pdf_path)
-    
-    # Load the document
-    # This reads the PDF and converts each page into a Document object
-    # Each Document contains the page content and metadata (page number, source file, etc.)
     documents = loader.load()
+    # Add source file path to metadata
+    for doc in documents:
+        doc.metadata['source_file'] = file_path
+        doc.metadata['source_filename'] = Path(file_path).name
     
     return documents
 
 
-def split_documents_into_chunks(documents, chunk_size=10000, chunk_overlap=1000):
+def load_8k_filings(directory="data/apple_8k_filings", num_filings=10):
+    """
+    Load the last N 8-K filing files from the directory.
+    
+    Args:
+        directory (str): Directory containing the downloaded 8-K filings
+        num_filings (int): Number of most recent filings to load (default: 10)
+        
+    Returns:
+        list: List of Document objects from all loaded files
+    """
+    # Find the last N filing files
+    filing_files = find_latest_filing_files(directory, n=num_filings)
+    
+    if not filing_files:
+        raise FileNotFoundError(f"No 8-K filing files found in {directory}")
+    
+    print(f"Found {len(filing_files)} 8-K filing file(s) to load:")
+    for i, file_path in enumerate(filing_files, 1):
+        print(f"  {i}. {Path(file_path).name}")
+    
+    # Load all files and combine documents
+    all_documents = []
+    for file_path in filing_files:
+        try:
+            print(f"\nLoading: {Path(file_path).name}...")
+            documents = load_filing_file(file_path)
+            all_documents.extend(documents)
+            print(f"  ✓ Loaded {len(documents)} document(s)")
+        except Exception as e:
+            print(f"  ⚠ Error loading {file_path}: {e}")
+            continue
+    
+    return all_documents
+
+
+def split_documents_into_chunks(documents, chunk_size=1000, chunk_overlap=100):
     """
     Split documents into smaller chunks using RecursiveCharacterTextSplitter.
     
@@ -121,27 +164,41 @@ def create_vector_store(chunks, persist_directory="chroma_db", embedding_model="
 
 
 if __name__ == "__main__":
-    # Example: Load a PDF from the data folder
-    pdf_filename = "Neamen.pdf"
+    import sys
+    
+    # Default: load last 10 8-K filings
+    num_filings = 10
+    if len(sys.argv) > 1:
+        try:
+            num_filings = int(sys.argv[1])
+        except ValueError:
+            print(f"Invalid number: {sys.argv[1]}. Using default: {num_filings}")
     
     try:
-        # Load the PDF documents
-        documents = load_pdf_from_data_folder(pdf_filename)
+        print("=" * 60)
+        print("Apple 8-K Filing Ingestion")
+        print("=" * 60)
         
-        # Print the total number of pages
-        # The number of documents typically equals the number of pages in the PDF
-        total_pages = len(documents)
-        print(f"Successfully loaded PDF: {pdf_filename}")
-        print(f"Total number of pages: {total_pages}")
+        # Load the 8-K filing documents
+        print(f"\nLoading last {num_filings} 8-K filings...")
+        documents = load_8k_filings(
+            directory="data/apple_8k_filings",
+            num_filings=num_filings
+        )
         
-        # Optional: Print some information about the first page
+        # Print summary
+        total_documents = len(documents)
+        print(f"\n✓ Successfully loaded {total_documents} total document(s) from {num_filings} filing(s)")
+        
+        # Optional: Print some information about the first document
         if documents:
-            print(f"\nFirst page preview:")
-            print(f"Page content length: {len(documents[0].page_content)} characters")
+            print(f"\nFirst document preview:")
+            print(f"Content length: {len(documents[0].page_content)} characters")
             print(f"Metadata: {documents[0].metadata}")
         
         # Split the documents into chunks
-        # This is a critical step for RAG systems - see comments above for why
+        # This is a critical step for RAG systems - chunks allow the LLM to process
+        # documents that are too large to fit in context windows
         print(f"\nSplitting documents into chunks...")
         chunks = split_documents_into_chunks(
             documents,
@@ -150,9 +207,7 @@ if __name__ == "__main__":
         )
         
         # Print the number of chunks created
-        print(f"Total number of chunks created: {len(chunks)}")
-        
-        
+        print(f"✓ Total number of chunks created: {len(chunks)}")
         
         # Create embeddings and store in vector database
         # This converts each chunk into a numerical vector and stores it for fast similarity search
@@ -170,17 +225,27 @@ if __name__ == "__main__":
         
         # Optional: Test the vector store with a sample query
         print(f"\nTesting vector store with a sample query...")
-        test_query = "What is a MOSFET?"
+        test_query = "What are Apple's quarterly earnings?"
         results = vector_store.similarity_search(test_query, k=2)
         print(f"  Query: '{test_query}'")
         print(f"  Retrieved {len(results)} most relevant chunks:")
         for i, result in enumerate(results, 1):
             print(f"    {i}. Chunk (length: {len(result.page_content)} chars)")
             print(f"       Preview: {result.page_content[:150]}...")
+        
+        print("\n" + "=" * 60)
+        print("Ingestion Complete!")
+        print("=" * 60)
+        print("\nThe 8-K filings are now available for use in the RAG pipeline.")
+        print("You can use chat.py to query the ingested documents.")
             
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        print(f"Please make sure the PDF file '{pdf_filename}' exists in the 'data' folder.")
+        print(f"\nTo fix this:")
+        print(f"  1. Make sure you've run download_apple_8k.py first to download the filings")
+        print(f"  2. Check that the 'data/apple_8k_filings' folder exists")
     except Exception as e:
-        print(f"An error occurred while loading the PDF: {e}")
+        print(f"An error occurred while loading the filings: {e}")
+        import traceback
+        traceback.print_exc()
 
