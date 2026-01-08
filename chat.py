@@ -93,6 +93,7 @@ def load_neo4j_graph(uri=None, username=None, password=None, database="neo4j"):
 def query_knowledge_graph(graph: Neo4jGraph, query: str, max_results: int = 10) -> str:
     """
     Query the Neo4j knowledge graph to find related entities and relationships.
+    Improved version with better entity matching and relationship discovery.
     
     Args:
         graph (Neo4jGraph): Neo4j graph instance
@@ -105,82 +106,177 @@ def query_knowledge_graph(graph: Neo4jGraph, query: str, max_results: int = 10) 
     if graph is None:
         return ""
     
-    # Create a Cypher query to find entities and their relationships
-    # This searches for entities that match the query and returns their relationships
-    # Note: Adapts to different entity schemas (Organization, Product, Risk, Metric, etc.)
-    cypher_query = """
-    // Search for entities by name, id, or any property containing the query
-    MATCH (e)
-    WHERE (
-        (e.name IS NOT NULL AND toLower(e.name) CONTAINS toLower($query)) OR
-        (e.id IS NOT NULL AND toLower(e.id) CONTAINS toLower($query)) OR
-        any(key IN keys(e) WHERE key <> 'id' AND key <> 'name' AND 
-            e[key] IS NOT NULL AND toLower(toString(e[key])) CONTAINS toLower($query))
-    )
-    WITH e LIMIT $limit
+    # Extract key terms from the query for better matching
+    # Remove common question words and focus on entities
+    query_lower = query.lower()
+    stop_words = {'where', 'is', 'what', 'who', 'when', 'how', 'the', 'a', 'an', 'are', 'was', 'were', 'does', 'do', 'did', 'can', 'could', 'will', 'would', 'should'}
+    query_terms = [term for term in query_lower.split() 
+                   if term not in stop_words and len(term) > 2]  # Only keep meaningful terms
     
-    // Get relationships from matching entities (both directions)
-    OPTIONAL MATCH (e)-[r]->(related)
-    WITH e, r, related, labels(e) as entity_labels, labels(related) as related_labels
-    WHERE related IS NOT NULL
-    RETURN DISTINCT e, type(r) as relationship_type, related, entity_labels, related_labels
+    # If no meaningful terms after filtering, use the whole query
+    if not query_terms:
+        query_terms = [query_lower]
+    
+    # Build a more comprehensive Cypher query
+    # This query searches for entities matching any query term and returns their relationships
+    # Use UNION to combine both directions of relationships
+    cypher_query = """
+    // Find entities that match any query term in their properties
+    MATCH (e)
+    WHERE any(term IN $queryTerms WHERE 
+        any(key IN keys(e) WHERE 
+            e[key] IS NOT NULL AND 
+            toLower(toString(e[key])) CONTAINS term
+        )
+    )
+    WITH e, labels(e) as entity_labels
+    LIMIT $limit
+    
+    // Get outgoing relationships
+    MATCH (e)-[r]->(related)
+    RETURN e, type(r) as rel_type, related, entity_labels, labels(related) as related_labels
     LIMIT $limit
     """
     
     try:
+        # Try the main query first
         results = graph.query(
             cypher_query,
-            params={"query": query, "limit": max_results}
+            params={"queryTerms": query_terms, "limit": max_results}
         )
         
-        if not results:
-            # Fallback: try a simpler query that searches all node properties
-            fallback_query = """
-            MATCH (e)-[r]->(related)
-            WHERE any(key IN keys(e) WHERE 
-                e[key] IS NOT NULL AND toLower(toString(e[key])) CONTAINS toLower($query)
-            ) OR any(key IN keys(related) WHERE 
-                related[key] IS NOT NULL AND toLower(toString(related[key])) CONTAINS toLower($query)
+        # Also try reverse relationships
+        if not results or len(results) < max_results:
+            reverse_query = """
+            MATCH (e)
+            WHERE any(term IN $queryTerms WHERE 
+                any(key IN keys(e) WHERE 
+                    e[key] IS NOT NULL AND 
+                    toLower(toString(e[key])) CONTAINS term
+                )
             )
-            RETURN DISTINCT e, type(r) as relationship_type, related, labels(e) as entity_labels, labels(related) as related_labels
+            WITH e, labels(e) as entity_labels
+            LIMIT $limit
+            
+            // Get incoming relationships
+            MATCH (related)-[r]->(e)
+            RETURN e, type(r) as rel_type, related, entity_labels, labels(related) as related_labels
             LIMIT $limit
             """
-            results = graph.query(
-                fallback_query,
-                params={"query": query, "limit": max_results}
+            reverse_results = graph.query(
+                reverse_query,
+                params={"queryTerms": query_terms, "limit": max_results}
             )
+            if reverse_results:
+                if results:
+                    results.extend(reverse_results)
+                else:
+                    results = reverse_results
+        
+        if not results:
+            # Fallback 1: Try searching for specific entity types mentioned in query
+            # Look for Organization entities if query mentions company names
+            if any(term in query_lower for term in ['apple', 'company', 'organization', 'corporation', 'inc', 'corp']):
+                org_query = """
+                MATCH (org:Organization)-[r]->(related)
+                WHERE any(term IN $queryTerms WHERE 
+                    any(key IN keys(org) WHERE 
+                        org[key] IS NOT NULL AND 
+                        toLower(toString(org[key])) CONTAINS term
+                    )
+                )
+                RETURN org as e, type(r) as rel_type, related, labels(org) as entity_labels, labels(related) as related_labels
+                LIMIT $limit
+                """
+                results = graph.query(
+                    org_query,
+                    params={"queryTerms": query_terms, "limit": max_results}
+                )
+            
+            # Fallback 2: If still no results, try location-related queries
+            if not results and any(term in query_lower for term in ['where', 'location', 'headquarters', 'headquartered', 'located', 'city', 'address', 'based']):
+                location_query = """
+                MATCH (e)-[r:LOCATED_IN]->(loc:Location)
+                WHERE any(term IN $queryTerms WHERE 
+                    any(key IN keys(e) WHERE 
+                        e[key] IS NOT NULL AND 
+                        toLower(toString(e[key])) CONTAINS term
+                    )
+                )
+                RETURN e, type(r) as rel_type, loc as related, labels(e) as entity_labels, labels(loc) as related_labels
+                LIMIT $limit
+                """
+                results = graph.query(
+                    location_query,
+                    params={"queryTerms": query_terms, "limit": max_results}
+                )
+                
+                # Also try reverse direction (Location -> Organization)
+                if not results:
+                    location_query_reverse = """
+                    MATCH (loc:Location)<-[r:LOCATED_IN]-(e)
+                    WHERE any(term IN $queryTerms WHERE 
+                        any(key IN keys(e) WHERE 
+                            e[key] IS NOT NULL AND 
+                            toLower(toString(e[key])) CONTAINS term
+                        )
+                    )
+                    RETURN e, type(r) as rel_type, loc as related, labels(e) as entity_labels, labels(loc) as related_labels
+                    LIMIT $limit
+                    """
+                    results = graph.query(
+                        location_query_reverse,
+                        params={"queryTerms": query_terms, "limit": max_results}
+                    )
         
         if not results:
             return ""
         
         # Format the results as a readable string
         formatted_results = []
+        seen_relationships = set()  # Avoid duplicates
+        
         for record in results:
             entity = record.get('e', {})
-            rel_type = record.get('relationship_type', 'RELATED_TO')
+            rel_type = record.get('rel_type', 'RELATED_TO')
             related = record.get('related', {})
             entity_labels = record.get('entity_labels', [])
             related_labels = record.get('related_labels', [])
             
-            # Extract entity name/id
-            entity_name = entity.get('name') or entity.get('id') or str(entity)
-            related_name = related.get('name') or related.get('id') or str(related)
+            # Extract entity name/id - try multiple property names
+            entity_name = (entity.get('name') or 
+                          entity.get('id') or 
+                          entity.get('title') or
+                          next((entity.get(k) for k in entity.keys() if 'name' in k.lower() or 'id' in k.lower()), None) or
+                          str(entity))
+            
+            related_name = (related.get('name') or 
+                           related.get('id') or 
+                           related.get('title') or
+                           next((related.get(k) for k in related.keys() if 'name' in k.lower() or 'id' in k.lower()), None) or
+                           str(related))
             
             entity_type = entity_labels[0] if entity_labels else 'Entity'
             related_type = related_labels[0] if related_labels else 'Entity'
             
-            formatted_results.append(
-                f"- {entity_type} '{entity_name}' --[{rel_type}]--> {related_type} '{related_name}'"
-            )
+            # Create a unique key for this relationship
+            rel_key = f"{entity_type}:{entity_name}--{rel_type}-->{related_type}:{related_name}"
+            if rel_key not in seen_relationships:
+                seen_relationships.add(rel_key)
+                formatted_results.append(
+                    f"- {entity_type} '{entity_name}' --[{rel_type}]--> {related_type} '{related_name}'"
+                )
         
         return "\n".join(formatted_results) if formatted_results else ""
         
     except Exception as e:
         print(f"  Warning: Error querying knowledge graph: {e}")
+        import traceback
+        traceback.print_exc()
         return ""
 
 
-def hybrid_retrieve(vector_store, neo4j_graph, query: str, vector_k: int = 3, kg_max_results: int = 10) -> Dict[str, Any]:
+def hybrid_retrieve(vector_store, neo4j_graph, query: str, vector_k: int = 3, kg_max_results: int = 10, debug: bool = False) -> Dict[str, Any]:
     """
     Perform hybrid retrieval combining vector search and knowledge graph search.
     
@@ -190,6 +286,7 @@ def hybrid_retrieve(vector_store, neo4j_graph, query: str, vector_k: int = 3, kg
         query (str): User query
         vector_k (int): Number of vector search results
         kg_max_results (int): Maximum KG results
+        debug (bool): Print debug information
         
     Returns:
         dict: Dictionary containing 'vector_context' and 'kg_context'
@@ -201,8 +298,16 @@ def hybrid_retrieve(vector_store, neo4j_graph, query: str, vector_k: int = 3, kg
         for i, doc in enumerate(vector_results)
     ])
     
+    if debug:
+        print(f"  Vector search: Found {len(vector_results)} chunks")
+    
     # 2. Knowledge Graph Search: Get related entities
     kg_context = query_knowledge_graph(neo4j_graph, query, max_results=kg_max_results)
+    
+    if debug:
+        print(f"  KG search: Found {len(kg_context.split(chr(10))) if kg_context else 0} relationships")
+        if kg_context:
+            print(f"  KG results preview:\n{kg_context[:500]}...")
     
     return {
         "vector_context": vector_context,
